@@ -36,6 +36,7 @@ class RPA():
         self.Ue = []              
         self.Gpp = []
         self.Gee = []
+        self.IncludeEvRPA = True # include perturbation term for the excluded volume interaction        
         
     def SetDOP(self,DOP):
         self.DOP = np.array(DOP, dtype=float)
@@ -43,6 +44,7 @@ class RPA():
         self.charge = np.array(charge, dtype=float)
     def SetC(self,C):
         self.C = np.array(C, dtype=float)
+        self.n = self.C * self.V / self.DOP
     def Setabead(self,abead):
         self.abead = np.array(abead, dtype=float)
     def Setu0(self,u0):
@@ -61,7 +63,6 @@ class RPA():
         self.nk = int(nk)
     def Setchain(self,chain):
         self.chain = chain
-                
     def gD_DGC(self,i):
         '''Debye function for discreate gaussian chain of species i at all wavenumbers'''
         N = self.DOP[i]
@@ -69,9 +70,12 @@ class RPA():
         k = self.k
         gD = np.zeros(len(self.k))
         for m in range(int(N)):
-            for j in range(int(N)):
-                gD += np.exp(-b**2 * k**2/6. * np.abs(m-j))
-        return 1./N**2 * gD
+            for j in range(m,int(N)): #calculating the upper half
+                if m==j:
+                    gD += 0.5 * np.exp(-b**2 * k**2/6. * np.abs(m-j)) #multiply by 0.5 to account for over counting when multiply by 2 at the end
+                else:
+                    gD += np.exp(-b**2 * k**2/6. * np.abs(m-j))
+        return 1./N**2 *2 * gD
 
     def gD_CGC(self,i):
         '''Debye function for continuous gaussian chain of species i at all wavenumbers'''
@@ -175,12 +179,22 @@ class RPA():
         Gee =  self.Gee
         y=[]
         for i,k in enumerate(self.k):                    
-            y.append(k**2 * np.log(det(np.identity(self.S)+ np.dot(U[i],Gpp[i]))) + k**2 * np.log(det(np.identity(self.S)+ np.dot(Ue[i],Gee[i]))))
-        FRPA = self.V/(4.*np.pi**2) * simps(y,self.k)
+            EE =  k**2 * np.log(det(np.identity(self.S)+ np.dot(Ue[i],Gee[i])))
+            y.append(EE)
+        Fee = self.V/(4.*np.pi**2) * simps(EE,self.k)
+        F = FMF + Fee
+ 
+        if self.IncludeEvRPA:
+            y = []
+            for i,k in enumerate(self.k):
+                PP = k**2 * np.log(det(np.identity(self.S)+ np.dot(U[i],Gpp[i])))
+                y.append(PP)
+            Fpp = self.V/(4.*np.pi**2) * simps(PP,self.k)
+            F += Fpp        
 
-        return FMF + FRPA
+        return F
 
-    def mu(self, i, dn = 10e-5):
+    def mu(self, i, dn = 10e-9):
         ''' Chemical potential'''
         
         muMF = np.log(self.C[i]/self.DOP[i]) + self.DOP[i] * np.dot(self.C,self.u0[i,:])
@@ -197,11 +211,15 @@ class RPA():
                        
             A1 = np.identity(self.S)+ np.dot(U[j],Gpp1[j])
             B1 = np.identity(self.S)+ np.dot(Ue[j],Gee1[j])
-            f1 =  np.log(det(np.dot(A1,B1)))
+            f1 =  np.log(det(B1))
+            if self.IncludeEvRPA:
+                f1 += np.log(det(A1))
             
             A2 = np.identity(self.S)+ np.dot(U[j],Gpp2[j])
             B2 = np.identity(self.S)+ np.dot(Ue[j],Gee2[j])
-            f2 =  np.log(det(np.dot(A2,B2)))
+            f2 =  np.log(det(B2))
+            if self.IncludeEvRPA:
+                f2 += np.log(det(A2))
 
             der = (f2-f1)/(2*dn)
             y.append(k**2 * der)
@@ -210,7 +228,7 @@ class RPA():
         muRPA *= self.V/(4.*np.pi**2)
         return muMF + muRPA
     
-    def P(self, dV = 10e-5):
+    def P(self, dV = 10e-9):
         '''Pressure'''
         P_MF = np.sum(self.C/self.DOP) + 1./2. * np.dot(np.dot(self.C,self.u0),self.C) 
 
@@ -224,11 +242,15 @@ class RPA():
         for j,k in enumerate(self.k):                      
             A1 = np.identity(self.S)+ np.dot(U[j],Gpp1[j])
             B1 = np.identity(self.S)+ np.dot(Ue[j],Gee1[j])
-            f1 = (self.V-dV) *  np.log(det(np.dot(A1,B1)))
-            
+            f1 = (self.V-dV) *  np.log(det(B1))
+            if self.IncludeEvRPA: 
+                f1 += (self.V-dV) *  np.log(det(A1))                
+
             A2 = np.identity(self.S)+ np.dot(U[j],Gpp2[j])
             B2 = np.identity(self.S)+ np.dot(Ue[j],Gee2[j])
-            f2 = (self.V+dV) * np.log(det(np.dot(A2,B2)))
+            f2 = (self.V+dV) * np.log(det(B2))
+            if self.IncludeEvRPA:             
+                f2 += (self.V+dV) *  np.log(det(A2))
 
             der = (f2-f1)/(2*dV)
             y.append(k**2 * der)

@@ -123,7 +123,7 @@ class Gibbs_System():
         self.kmax = 1000 
         self.nk =  1000 # number of mesh point
         self.chain = 'DGC' # DGC or CGC
-        
+        self.IncludeEvRPA = True        
         self.SetLogFile(self.LogFileName) # initialize LogFile
 
      
@@ -144,7 +144,13 @@ class Gibbs_System():
     def Setnk(self,nk):
         self.nk = int(nk)
     def Setchain(self,chain):
-        self.chain = chain        
+        self.chain = chain    
+
+    def SetPtarget(self,P):
+        self.TargetP = np.float(P)
+        
+    def UpdateC(self):
+        self.SpeciesCTotal = self.CTotal  * self.SpeciesMoleFrac 
         
     def SetChargedSpecies(self):
         ''' Set indices and number of charged species and indices of neutral species'''
@@ -944,9 +950,9 @@ class Gibbs_System():
                     for i in self.NeutralSpecies:
                         DtC_tmp.append(np.min([self.ValuesCurrent[(i+1)*2],self.ValuesCurrent[(i+1)*2+1]]) * self.Dt[i+1])
                     Dtv = np.abs(np.min(DtC_tmp))/self.DtCtoDtv
-                    Dt_new = np.array(self.Dt)
-                    Dt_new[0] = Dtv
-                    self.SetDt(Dt_new)
+                    #Dt_new = np.array(self.Dt)
+                    #Dt_new[0] = Dtv
+                    #self.SetDt(Dt_new)
                                                                                                  
         if self.UseReRun != True: # just to ensure if not using rerun, set self.ReRun = False.
             self.ReRun = False
@@ -978,6 +984,49 @@ class Gibbs_System():
             model2 = [None]
             
         return [model1,model2]
+    
+    def RPABaroStat(self,dtC=0.2, maxIter = 1000 ,tol = 1.e-6):
+        import math 
+        '''
+        RPA class with defined interactionsn
+        dtC: step size
+        maxIter: max iteration step'''
+        
+        C1 = self.CTotal
+        Cs = self.SpeciesCTotal
+        RPA1 = RPA.RPA(self.Nspecies,self.Nspecies)
+        RPA1.Setchain(self.chain)
+        RPA1.SetDOP(self.SpeciesDOP)
+        RPA1.Setcharge(self.Charges)
+        RPA1.SetC(Cs)
+        RPA1.Setabead(self.abead)
+        RPA1.Setu0(self.u0)
+        RPA1.SetlB(self.lB)
+        RPA1.Setb(self.b)
+        RPA1.SetV(self.V)
+        RPA1.Setkmin(self.kmin)
+        RPA1.Setkmax(self.kmax)
+        RPA1.Setnk(self.nk)                
+        RPA1.IncludeEvRPA=self.IncludeEvRPA
+        RPA1.Initialize()
+        
+        self.Write2Log('==Barostat at P {}==\n'.format(self.TargetP))
+        self.Write2Log('# step C P Err\n')
+        err = 10.
+        step = 1
+        while err>tol:        
+            P1 = RPA1.P()
+            err = np.abs(P1-self.TargetP)/np.abs(self.TargetP)
+            self.Write2Log('{} {} {} {}\n'.format(step,C1,P1,err))
+            C1 = C1 * ( 1. + dtC*(math.sqrt(self.TargetP/P1) - 1.) )
+            RPA1.SetC(self.SpeciesMoleFrac *C1)
+            RPA1.Initialize()
+            if err <= tol:
+                self.Write2Log('error is below tolerance {}\n'.format(tol))
+                break
+            else:
+                step += 1
+        return C1
         
     def TakeGibbsStep(self):
         ''' Runs one simulation. '''
@@ -1091,10 +1140,13 @@ class Gibbs_System():
                     self.WriteStats()
                     
             elif self.Program == 'polyFTS' and self.JobType == 'RPA' and self.Barostat != True:
+                
+                self.Write2Log('\n==Iteration {}==\n'.format(self.Iteration))
                 # RPA of multi species
                 if self.Iteration == 1:
                     self.ValuesCurrent = self.VarsInit
                     self.WriteStats()
+                        
                 out = self.GetPolyFTSParameters() # convert to polyFTS parameters
                 VarModel1 = out[0]
                 VarModel2 = out[1]
@@ -1118,6 +1170,7 @@ class Gibbs_System():
                 RPA1.Setkmin(self.kmin)
                 RPA1.Setkmax(self.kmax)
                 RPA1.Setnk(self.nk)                
+                RPA1.IncludeEvRPA=self.IncludeEvRPA
                 RPA1.Initialize()
                 P1 = RPA1.P()
                 Operator_List1 = [[0.,0.],[P1,0.]]
@@ -1144,6 +1197,7 @@ class Gibbs_System():
                 RPA2.Setkmin(self.kmin)
                 RPA2.Setkmax(self.kmax)
                 RPA2.Setnk(self.nk)                
+                RPA2.IncludeEvRPA=self.IncludeEvRPA
                 RPA2.Initialize()
                 P2 = RPA2.P()
                 Operator_List2 = [[0.,0.],[P2,0.]]
