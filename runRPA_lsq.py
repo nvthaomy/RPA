@@ -18,27 +18,30 @@ import os
 
 dataFile = 'gibbs1.dat'
 logDir = 'log'
-nIter0 = 40
-nIter = 15
+nIter0 = 10
+nIter = 5
 dtV0 = 0.01
-dtC0 = 0.1
-dtV = 0.005
-dtC = 0.05
+dtC0 = 0.02
+dtV = 0.00
+dtC = 0.0
 try:
     os.mkdir(logDir)
 except:
     pass
 
-IncludeEvRPA = True
+IncludeEvRPA = False
 
 # Composition
-xSalts = np.linspace(0.001, 0.05, num=100, endpoint=True)
-xSalts = np.flip(xSalts)
-x1 = 0.00006
-x2 = 0.00006
-Ctot = 34.336833786185636
-CI0 = [2.18685370e-03, 2.94718774e-03, 1.71647717e+00, 1.71723751e+00, 3.08956400e+01]
-fI0 = 0.5467196763684842
+xSalts = np.linspace(0.001, 0.1, num=20, endpoint=True)
+#xSalts = np.flip(xSalts)
+xPE = 2*0.00006
+fPAA = 0.3
+x1 = xPE*fPAA
+x2 = xPE-x1
+Ctot = 33.3378644184
+CI0 = [0.05*x1*Ctot, 0.05*x2*Ctot, (xSalts[0]+x1)*Ctot, (xSalts[0]+x2)*Ctot, (1-x1-x2-(xSalts[0]+x1)-(xSalts[0]+x2))*Ctot]
+#CI0 =  [0.19187351,   0.12935853,   0.51519509,   0.45268012,  32.11688125] 
+fI0 = 0.55
 
 ensemble = 'NPT'
 Ptarget = 285.9924138 
@@ -46,20 +49,20 @@ Ptarget = 285.9924138
 # Molecules
 number_species = 5 
 chargedPairs = [[0,2],[1,3],[2,3]]       # only include pairs
-PAADOP = 20
-PAHDOP = 20
+PAADOP = 50
+PAHDOP = 50
 DOP = [PAADOP,PAHDOP,1,1,1]
 charges = [-1,1,1,-1,0]
 
 # Forcefield
-u0 = [[2.43477480359,3.49003331967,0.0256923960695,2.06917625726,1.11707969307],
-      [3.49003331967,7.14073417306,1.4334258483,1.93012271981,1.50224591359],
-      [0.0256923960695,1.4334258483,0.794886183768,0.0132698230775,0.0132691595333],
-      [2.06917625726,1.93012271981,0.0132698230775,1.92109327616,0.680809658472],
-      [1.11707969307,1.50224591359,0.0132691595333,0.680809658472,0.449843180313]]
+u0 = [[2.4362767487,2.91300224542,0.025694451934,2.11006226319,1.13846068423],
+      [2.91300224542,6.11007508231,1.75498875979,1.35437785696,1.31135889157],
+      [0.025694451934,1.75498875979,0.794886183768,0.0132698230775,0.0132691595333],
+      [2.11006226319,1.35437785696,0.0132698230775,1.92109327616,0.680809658472],
+      [1.13846068423,1.31135889157,0.0132691595333,0.680809658472,0.449843180313]]
 abead = [0.45,0.45,0.31,0.31,0.31]
 lB = 9.349379737083224
-b = [0.140933841841, 0.14752745998, 1,1,1]
+b = [0.142895474876,0.147135133373, 1,1,1]
 
 # Numerical
 V = 20.
@@ -96,12 +99,13 @@ GM.dtV = dtV
 GM.dtC = dtC
 
 log = open(dataFile,'w')
-log.write('# xNaCl Ctot fI fII CI1 CII1 CI2 CII2 CI3 CII3 CI4 CII4 CI5 CII5 dP dmuPAA_Na dmuPAH_Cl dmuNaCl dmuW PI muI1 muI2 muI3 muI4 muI5 PII muII1 muII2 muII3 muII4 muII5\n')
+log.write('# xSalt Ctot fI fII CI1 CII1 CI2 CII2 CI3 CII3 CI4 CII4 CI5 CII5 dP dmuPAA_Na dmuPAH_Cl dmuNaCl dmuW PI muI1 muI2 muI3 muI4 muI5 PII muII1 muII2 muII3 muII4 muII5\n')
 log.flush()
 
-for i, x3 in enumerate(xSalts):
-    print('==xNacl {}=='.format(x3))
-    x4 = x3
+for i, xSalt in enumerate(xSalts):
+    print('==xSalt {}=='.format(xSalt))
+    x3 = x1+xSalt
+    x4 = x2+xSalt
     x5 = 1.0 - (x1+x2+x3+x4)
     xs = np.array([x1,x2,x3,x4,x5])
     t0 = time.time()
@@ -115,7 +119,7 @@ for i, x3 in enumerate(xSalts):
         fI_Init = fI
         CI_Init = CIs
         CI_Init[2] = Ctot*x3
-        CI_Init[3] = Ctot*x3
+        CI_Init[3] = Ctot*x4
         if i % 20 == 0:
             GM.nIter = nIter0 
             GM.dtV = dtV0
@@ -128,12 +132,12 @@ for i, x3 in enumerate(xSalts):
     GM.SetInitialCI(CI_Init)
     GM.SetCtot(Ctot)
     GM.SetSpeciesVolFrac(xs)
-    GM.LogFileName = '{}/xNaCl{}_log.txt'.format(logDir,x3)
+    GM.LogFileName = '{}/xNaCl{}_log.txt'.format(logDir,xSalt)
 
     fI,CIs,fII,CIIs,errs, PI, muIs, PII, muIIs, cost = GM.Run()
     Ctot = GM.Ctot
     t1 = time.time()
-    s = '{} {} {} {} '.format(x3,Ctot,fI,fII)
+    s = '{} {} {} {} '.format(xSalt,Ctot,fI,fII)
     for i in range(5):
         s+= str(CIs[i])+' '+str(CIIs[i])+' '
     for err in errs:

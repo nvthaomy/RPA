@@ -46,6 +46,8 @@ class GibbsSolver():
         self.nIter = 5 # number of time to run LSQ  
         self.dtV = 0.01
         self.dtC = 0.1
+        self.UseAdaptiveDtC = False
+        self.Iter = 0
         
         self.CI_Init = []
         self.fI_Init = 0.55
@@ -295,11 +297,12 @@ class GibbsSolver():
                 
         f = [PII-PI]
         f.extend(muIIpairs-muIpairs)
-        self.Write2Log('\n')
-        self.Write2Log('fI {}\n'.format(fI))
-        self.Write2Log('CIs {}\n'.format(CIs))
-        self.Write2Log('err {}\n'.format(f))
-        self.Write2Log('LSQ {}\n'.format(np.sum(np.array(f)**2)))
+        self.Iter += 1   
+#        self.Write2Log('\n')
+#        self.Write2Log('fI {}\n'.format(fI))
+#        self.Write2Log('CIs {}\n'.format(CIs))
+#        self.Write2Log('err {}\n'.format(f))
+#        self.Write2Log('LSQ {}\n'.format(np.sum(np.array(f)**2)))
         return f
 
     
@@ -470,4 +473,258 @@ class GibbsSolver():
         self.Write2Log(obs+'\n')
         return fI,CIs,fII,CIIs,gibbsErr, PI, muIs, PII, muIIs, cost
 
-    
+    def RunQN(self, tol=1e-5, Fscale = 1.0):
+        '''Make RPA Class'''
+        RPA = RPAModule.RPA(self.Nspecies,self.Nspecies)
+        RPA.Setchain(self.chain)
+        RPA.SetDOP(self.DOP)
+        RPA.Setcharge(self.Charges)
+        RPA.Setabead(self.abead)
+        RPA.Setu0(self.u0)
+        RPA.SetlB(self.lB)
+        RPA.Setb(self.b)
+        RPA.SetV(self.V)
+        RPA.Setkmin(self.kmin)
+        RPA.Setkmax(self.kmax)
+        RPA.Setnk(self.nk)
+        RPA.IncludeEvRPA = self.IncludeEvRPA
+        RPA.SetC(self.xs*self.Ctot)
+        RPA.Initialize()
+        
+        if self.ensemble == 'NPT':
+            self.Ctot = self.BaroStat(RPA)
+            self.UpdateC()
+            self.Write2Log('== Barostat at P = {} -> Ctot = {}\n'.format(self.Ptarget,self.Ctot))     
+
+        # calculate total neutral species C
+        self.CtotNeutralSpecies = self.GetEffC(self.CtotSpecies)
+       
+        # parameters in box I: x = [f1,Cpair1, Cpair2, ..., Cneutral1, Cneutral2, ...]
+        CINeutral_init = self.GetEffC(self.CI_Init)
+        x0 = [self.fI_Init]
+        xII = [1-self.fI_Init]
+        x0.extend(CINeutral_init)
+        xII.extend((self.CtotNeutralSpecies - self.fI_Init*CINeutral_init)/(1-self.fI_Init))
+        
+        # time step
+        dt = [self.dtV]
+        dt.extend([self.dtC]*self.NeffSpecies)
+        x0 = np.array([x0]).transpose() #make into column vector Nx1
+        xII = np.array([xII]).transpose() 
+        
+        dt = np.array([dt]).transpose()
+        N = x0.shape[0] 
+        
+        # scaling F
+        if Fscale == 1.0:
+            Fscale = np.ones(N)
+        else:
+            Fscale = np.array(Fscale)
+            
+        error = 1e10
+        
+        s = '\n# Iteration Error Overflow MinStepLength fI '
+        for i in range(self.Nspecies):
+            s += 'C{}I C{}II '.format(i+1, i+1)
+        s += 'PI dP '
+        for i in range(self.NeffSpecies):
+            s += 'muPair{}I dmuPair{} '.format(i+1, i+1)            
+        self.Write2Log(s+'\n')
+        
+        JacobianLog = open('Jacobian.dat','w')
+        JacobianLog.write('# Iteration ')
+        for i in range(N):
+            for j in range(N):
+                JacobianLog.write('invJ{}_{} '.format(i,j))
+        JacobianLog.write('\n')
+        JacobianLog.flush()
+            
+        overFlowCount = 0
+        scaledNormJ = 10**100
+        while error > tol or self.Iter < 100: # always run if number of iteration is small
+            overFlow = False
+            if self.Iter == 0:
+                F = self.Obj(x0,RPA,self.CtotSpecies)
+                F *= Fscale 
+                normF = 0.5 * np.matmul(np.array(F), np.array(F).transpose())
+                F = np.array([F]).transpose()
+                J0 = 1000. * np.identity(N)
+                invJ = np.linalg.inv(J0) 
+                x = x0.copy()
+            else:
+                F = self.Obj(x,RPA,self.CtotSpecies)
+                F *= Fscale 
+                normF = 0.5 * np.matmul(np.array(F), np.array(F).transpose())
+                F = np.array([F]).transpose()
+                dF = F - F_prev
+                A = dx_prev - np.matmul(invJ_prev, dF)
+                B = np.matmul(np.matmul(np.transpose(dx_prev), invJ_prev), dF)
+                invJ = invJ_prev + 1/B * np.matmul(np.matmul(A, np.transpose(dx_prev)), invJ_prev)
+
+            if self.UseAdaptiveDtC:
+                gamma = [1] # scaling of volume fraction
+                for i in range(1,N):
+                    gamma.append(np.min([x[i],xII[i]])) # get minimum concentration of species i-1 in 2 boxes
+            else:
+                gamma = [1]*N
+
+            J = np.linalg.inv(invJ)                
+            normJ = np.linalg.norm(J)
+            scaledNormJ = normJ
+            
+            gamma = np.array([gamma]).transpose()
+            dt_adaptive0 = np.multiply(gamma,dt)
+            x_prev = x.copy() 
+            x = x_prev - np.multiply(dt_adaptive0,np.matmul(invJ,F))  
+            F_prev = F.copy() 
+            invJ_prev = invJ.copy() 
+            
+            # fix overflow
+            if x[0,0] < self.VolFracBounds[0] or x [0,0] > self.VolFracBounds[1] or not all([c >= 0 for c in x[1:,0]]) or not all([x[i,0] < self.CtotNeutralSpecies[i-1]/x[0,0] for i in range(1,N)]):
+                overFlow = True                    
+            #adjust dt until no longer running into overflow
+            k = 0
+            dt_adaptive = dt_adaptive0.copy()    
+            while overFlow == True:
+                dt_adaptive *= 0.8                  
+                if k > 50:
+                    dt_adaptive *= 0.1
+                x = x_prev - np.multiply(dt_adaptive,np.matmul(invJ,F))
+                if x[0,0] < self.VolFracBounds[0] or x [0,0] > self.VolFracBounds[1] or not all([c >= 0 for c in x[1:,0]]) or not all([x[i,0] < self.CtotNeutralSpecies[i-1]/x[0,0] for i in range(1,N)]):
+                    overFlow = True
+                else:
+                    overFlow = False
+                if k > 100:
+                    Exception('Getting stuck, x: {}'.format(x))
+                k += 1  
+                
+            #adjust dt to achieve reduction in the norm of F
+            # F_next = self.Obj(x,RPA,self.CtotSpecies) # F in the next iteration
+            # normF_next = 0.5 * np.matmul(np.array(F_next), np.array(F_next).transpose())            
+            # k = 0
+            # while normF_next > normF:
+            #     dt_adaptive *= 0.5
+            #     x = x_prev - np.multiply(dt_adaptive,np.matmul(invJ,F))
+            #     F_next = self.Obj(x,RPA,self.CtotSpecies)
+            #     normF_next = 0.5 * np.matmul(np.array(F_next), np.array(F_next).transpose())
+            #     k += 1
+            #     if k > 50 or min(dt_adaptive[:,0]) < 1e-5:
+            #         break
+            dx_prev = x-x_prev
+            stepLength = dt_adaptive/dt_adaptive0 
+            stepLength = stepLength[0,0] # get the final step length
+
+            # calculate errors
+            fI = x[0,0]
+            CIpairs = x[1:,0]
+            CIs = np.zeros(self.Nspecies)
+            for i in self.ChargedSpecies:
+                CIs[i] = self.GetChargedC(i,CIpairs)                
+            for ii,i in enumerate(self.NeutralSpecies):
+                CIs[i] = CIpairs[len(self.ChargedPairs)+ii]
+            fII = 1-fI    
+            CIIs = (self.CtotSpecies - fI*CIs)/(fII)
+            xII[0,0] = fII
+            xII[1:,0] = (self.CtotNeutralSpecies - fI*CIpairs)/fII
+            
+            RPA.SetC(CIs)        
+            RPA.Initialize()
+            PI = RPA.P()        
+            muIs = np.zeros(self.Nspecies)
+            for i in range(self.Nspecies):
+                muIs[i] = RPA.mu(i)
+            muIpairs = np.zeros(self.NeffSpecies)
+            for i,[i1,i2] in enumerate(self.ChargedPairs):
+                muIpairs[i] = self.GetEffMu([i1,i2],muIs[i1],muIs[i2])
+            for ii,i in enumerate(self.NeutralSpecies):
+                muIpairs[ii+len(self.ChargedPairs)] = muIs[i]
+            
+            vals = [PI]
+            vals.extend(muIpairs)
+            error = max(np.abs(F[:,0]/Fscale )/np.abs(np.array(vals))) # divide by the scaling factors to get absolute residuals F
+            
+            s = '{} {} {} {} {} '.format(self.Iter, error, overFlow, min(dt_adaptive[:,0]), fI)
+            for i in range(self.Nspecies):
+                s += '{} {} '.format(CIs[i],CIIs[i])
+            s += '{} {} '.format(PI,F[0,0])
+            for i in range(self.NeffSpecies):
+                s += '{} {} '.format(muIpairs[i],F[i+1,0])            
+            self.Write2Log(s+'\n')
+            
+            s = '{} '.format(self.Iter)
+            for i in range(N):
+                for tmp in invJ[i].tolist():
+                    s+= '{} '.format(tmp)
+            s += '\n'
+            JacobianLog = open('Jacobian.dat','a')
+            JacobianLog.write(s)
+            JacobianLog.flush()
+            
+        fI = x[0,0]
+        CIpairs = x[1:,0]
+        x_final = x
+        errs = self.Obj(x_final,RPA,self.CtotSpecies)
+        LSQ = np.sum(np.array(errs)**2)
+        self.Write2Log('x {}\n'.format(x[:,0]))
+        self.Write2Log('LSQ {}\n'.format(LSQ))
+
+        CIs = np.zeros(self.Nspecies)
+        for i in self.ChargedSpecies:
+            CIs[i] = self.GetChargedC(i,CIpairs)                
+        for ii,i in enumerate(self.NeutralSpecies):
+            CIs[i] = CIpairs[len(self.ChargedPairs)+ii]
+                       
+        fII = 1-fI    
+        CIIs = (self.CtotSpecies - fI*CIs)/(fII)
+        
+        self.Write2Log('fI {}\n'.format(fI))
+        self.Write2Log('CIs {}\n'.format(CIs))
+        self.Write2Log('fII {}\n'.format(fII))
+        self.Write2Log('CIIs {}\n'.format(CIIs))
+        print('fI {}\n'.format(fI))
+        print('CIs {}\n'.format(CIs))
+        print('fII {}\n'.format(fII))
+        print('CIIs {}\n'.format(CIIs))
+        
+        self.Write2Log('\n===overflow count: {}===\n'.format(overFlowCount)) 
+        
+        gibbsErr = self.Obj(x_final,RPA,self.CtotSpecies)
+        self.Write2Log('\n===errors===\n')
+        s = '# dP '
+        for i in range(len(self.ChargedPairs)):
+            s += 'dmuPair_{} '.format(i)
+        for i in self.NeutralSpecies:
+            s  += 'dmu_{} '.format(i)
+        self.Write2Log(s+'\n')
+        for err in gibbsErr:
+            self.Write2Log(err)
+            self.Write2Log(' ')
+            
+        self.Write2Log('\n===final observables===\n')
+        header = ''
+        obs = ''
+        RPA.SetC(CIs)
+        RPA.Initialize()
+        PI = RPA.P()
+        header +='# PI '
+        obs += '{} '.format(PI)
+        muIs = np.zeros(self.Nspecies)
+        for i in range(self.Nspecies):
+            header +='muI_{} '.format(i)
+            muIs[i] = RPA.mu(i)
+            obs += '{} '.format(muIs[i])
+
+        RPA.SetC(CIIs)
+        RPA.Initialize()
+        PII = RPA.P()
+        header +='# PII '
+        obs += '{} '.format(PII)
+        muIIs = np.zeros(self.Nspecies)
+        for i in range(self.Nspecies):
+            muIIs[i] = RPA.mu(i)
+            header +='muII_{} '.format(i)
+            obs += '{} '.format(muIIs[i])
+        self.Write2Log(header+'\n')
+        self.Write2Log(obs+'\n')
+        
+        return fI,CIs,fII,CIIs,gibbsErr, PI, muIs, PII, muIIs, 'N/A', self.Iter   

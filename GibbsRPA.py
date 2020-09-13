@@ -111,8 +111,15 @@ class Gibbs_System():
 
         self.DtCtoDtv           = 10. # ratio of concentration time step to volume fraction time step
         self.DtCMax             = None # maximum Dt to update the concentration
-        self.UseAdaptiveDtC     = False
-        
+        self.UseAdaptiveDtC     = False # if True and QNewton, dtC will be constrained by the smallest concentration of a species in 2 phases
+        self.QNewton            = True # use quasi Newton to update
+        self.x                  = [] # parameters to be update
+        self.dx                 = []
+        self.F                  = [] # residuals 
+        self.invJ               = [] # inverse of the Jacobian of F
+        self.J0scale            = 5.0 # scaling of the identity matrix used as initial guess for Jacobian, larger value = x is more sensitive to changes in F
+        self.JacobianLogName    = 'Jacobian.dat'
+        self.JacobianLog        = None
         # RPA parameters
         self.abead              = []
         self.u0                 = []
@@ -123,6 +130,7 @@ class Gibbs_System():
         self.kmax = 1000 
         self.nk =  1000 # number of mesh point
         self.chain = 'DGC' # DGC or CGC
+        self.gD = None # list of gD arrays (over k numbers) for each molecule, if provided, will skip this calculation everytime RPA is called
         self.IncludeEvRPA = True        
         self.SetLogFile(self.LogFileName) # initialize LogFile
 
@@ -276,7 +284,7 @@ class Gibbs_System():
         self.Cpair2 = self.GetEffC(2)
     
     def GetChargedC(self, i):
-        ''' Get the concentration of an individual charged species 
+        ''' Get the concentration of an individual charged species in box I 
             i: index of charged species i'''                        
         C = 0
         for indx, Pair in enumerate(self.ChargedPairs):
@@ -364,6 +372,12 @@ class Gibbs_System():
         self.LogFile = open(self.LogFileName,'a')
         self.LogFile.write(str(_text))
         self.LogFile.close()
+
+    def WriteJacobian(self,_text):
+        ''' Write out 2 Log file '''
+        self.JacobianLog = open(self.JacobianLogName,'a')
+        self.JacobianLog.write(str(_text))
+        self.JacobianLog.close()
         
     def SetJobType(self,_JobType):
         ''' The Jobtype to run.
@@ -870,61 +884,85 @@ class Gibbs_System():
                 self.CheckTotalCharge()
                 self.CheckTotalSpeciesC()
                 DtC_tmp = []
-                if self.UseAdaptiveDtC:
-                    self.UpdateChargedDtC()
-
-                if self.Barostat != True:
-                    for indx, var in enumerate(self.ValuesCurrent[::2]):                     
-                        if indx == 0: # volume fraction
-                            self.Write2Log('Volume fraction time step: {}\n'.format(self.Dt[0]))
-                            if self.Ensemble == 'NVT':
-                                self.ValuesCurrent[indx*2] = var + self.Dt[indx]*self.DvalsCurrent[indx+1]
-                                if self.ValuesCurrent[indx*2] < self.VolFracBounds[0]:
-                                    self.ValuesCurrent[indx*2] = self.VolFracBounds[0] # 0.10
-                                if self.ValuesCurrent[indx*2] > self.VolFracBounds[1]:
-                                    self.ValuesCurrent[indx*2] = self.VolFracBounds[1] # 0.90
-                                self.ValuesCurrent[indx*2+1] = 1.-self.ValuesCurrent[indx*2] # update phase II
-                            elif self.Ensemble == 'NPT':
-                                CTot_new = self.CTotal - self.Dt[0]*dUdP # if P-Ptarget > 0, lower CTot, else increase
-                                _NumberDens_Species = [CTot_new*_x for _x in self.SpeciesMoleFrac] # update number species
-                                self.SetSpeciesCTotal(_NumberDens_Species) # update CTotal and SpeciesCTotals
-                                
-                                # update volume fractions
-                                self.ValuesCurrent[indx*2] = var + self.Dt[indx]*self.DvalsCurrent[indx+1]
-                                
-                                if self.ValuesCurrent[indx*2] < self.VolFracBounds[0]:
-                                    self.ValuesCurrent[indx*2] = self.VolFracBounds[0] # 0.10
-                                if self.ValuesCurrent[indx*2] > self.VolFracBounds[1]:
-                                    self.ValuesCurrent[indx*2] = self.VolFracBounds[1] # 0.90
-                                self.ValuesCurrent[indx*2+1] = 1.-self.ValuesCurrent[indx*2] # update phase II
-                        else:  #update species
-                            # update neutral species first   
-                            if indx - 1 in self.NeutralSpecies: 
-                                if self.UseAdaptiveDtC:  
-                                    Dt_tmp = self.Dt[indx]
-                                else:
-                                    Dt_tmp = np.minimum(var,self.ValuesCurrent[indx*2+1])* self.Dt[indx]
-                                DtC_tmp.append(Dt_tmp)
-                                self.ValuesCurrent[indx*2] = var - self.Dt[indx] * self.DvalsCurrent[indx+1] 
-                                if self.ValuesCurrent[indx*2]  < 0.:
-                                    self.Write2Log('Value for operator {} < 0; iterating...\n'.format(indx))
-                                    self.ValuesCurrent[indx*2] = var/2.
-                                if self.ValuesCurrent[indx*2]  > self.SpeciesCTotal[indx-1]/self.ValuesCurrent[0]:       
-                                    self.Write2Log('Value for operator {} > [max]; setting to [max]...\n'.format(indx)) 
-                                    self.ValuesCurrent[indx*2] = self.SpeciesCTotal[indx-1]/self.ValuesCurrent[0] - 1e-5 
-
-                    # update charged pair concentration
-                    for indx, [i,j] in enumerate(self.ChargedPairs):
-                        Cpair1 = self.Cpair1[indx]
-                        Cpair2 = self.Cpair2[indx]
-                        if self.UseAdaptiveDtC:
-                            Dt_tmp = self.DtCpair[indx]
-                        else:
-                            Dt_tmp = np.min([Cpair1,Cpair2]) * self.DtCpair[indx]
-                        DtC_tmp.append(Dt_tmp)
-                        dMuPair = self.MuPair1[indx] - self.MuPair2[indx]
-                        Cpair1 = Cpair1 - Dt_tmp * dMuPair
-                        self.Cpair1[indx] = Cpair1
+                
+                # Use Quasi-Newton method to update parameters, currently only for charged system and NVT simulation
+                if self.Barostat != True and self.Ensemble == 'NVT' and self.QNewton:
+                    self.Write2Log('Update with Quasi Newton method')
+                    # parameters in box I: x = [f1,Cpair1, Cpair2, ..., Cneutral1, Cneutral2, ...]
+                    x = [self.ValuesCurrent[0]] # Box I
+                    xII = [self.ValuesCurrent[1]] # Box II
+                    x.extend(self.Cpair1)
+                    xII.extend(self.Cpair2)
+                    # residuals (equilibrium conditions)
+                    F = [-self.DvalsCurrent[1]] # PII-PI
+                    F.extend(self.MuPair1-self.MuPair2)
+                    # time step
+                    dt = [self.Dt[0]]
+                    dt.extend(self.DtCpair)
+                    for i in self.NeutralSpecies:
+                        x.append(self.ValuesCurrent[i*2+2])
+                        xII.append(self.ValuesCurrent[i*2+3])
+                        F.append(self.DvalsCurrent[i+2])
+                        dt.append(self.Dt[i+1])
+                    x = np.array([x]).transpose() #make into column vector Nx1
+                    xII = np.array([xII]).transpose()
+                    F = np.array([F]).transpose()
+                    dt = np.array([dt]).transpose()
+                    N = x.shape[0]
+                    
+                    # Update Jacobian for step >= 1:
+                    if self.Iteration == 1:
+                        J0 = self.J0scale * np.identity(N)
+                        invJ = np.linalg.inv(J0)
+                    else:
+                        dF = F - self.F
+                        A = self.dx - np.matmul(self.invJ, dF)
+                        B = np.matmul(np.matmul(np.transpose(self.dx), self.invJ), dF)
+                        invJ = self.invJ + 1/B * np.matmul(np.matmul(A, np.transpose(self.dx)), self.invJ)
+                    s='{} '.format(self.Iteration)
+                    for i in range(N):
+                        for tmp in invJ[i].tolist():
+                            s+= '{} '.format(tmp)
+                    s += '\n'
+                    self.WriteJacobian(s)
+                    
+                    # Update vI, CI using approximated Jacobian
+                    if self.UseAdaptiveDtC:
+                        gamma = [1] # scaling of volume fraction
+                        for i in range(1,N):
+                            gamma.append(np.min([x[i],xII[i]])) # get minimum concentration of species i-1 in 2 boxes
+                    else:
+                        gamma = [1]*N
+                    gamma = np.array([gamma]).transpose()
+                    dt_adaptive = np.multiply(gamma,dt)
+                    
+                    self.x = x.copy()
+                    x = self.x - np.multiply(dt_adaptive,np.matmul(invJ,F))
+                    
+                    # f1,f2
+                    self.ValuesCurrent[0] = x[0,0]
+                    if self.ValuesCurrent[0] < self.VolFracBounds[0]:
+                        self.ValuesCurrent[0] = self.VolFracBounds[0] # 0.10
+                    if self.ValuesCurrent[0] > self.VolFracBounds[1]:
+                        self.ValuesCurrent[0] = self.VolFracBounds[1] # 0.90 
+                    self.ValuesCurrent[1] = 1-self.ValuesCurrent[0]
+                    
+                    # concentration
+                    self.Cpair1 = x[1:1+len(self.ChargedPairs),0]
+                    for indx,i in enumerate(self.NeutralSpecies): 
+                        var = self.ValuesCurrent[i*2+2]
+                        self.ValuesCurrent[i*2+2] = x[1+len(self.ChargedPairs)+indx,0]
+                        if self.ValuesCurrent[i*2+2]  < 0.:
+                            self.Write2Log('Value for operator {} < 0; iterating...\n'.format(i+1))
+                            self.ValuesCurrent[i*2+2] = var/2.#temp_val
+                        if self.ValuesCurrent[i*2+2]  > self.SpeciesCTotal[i]/self.ValuesCurrent[0]:         
+                            self.Write2Log('Value for operator {} > [max]; setting to [max]...\n'.format(i+1)) 
+                            self.ValuesCurrent[i*2+2] = self.SpeciesCTotal[i]/self.ValuesCurrent[0] - 1e-5
+                    # Store values for next iteration
+                    self.F = F.copy()
+                    self.invJ = invJ.copy()
+                    self.dx = x-self.x
+                    
                     # update individual charged species concentration in box 1
                     for i in self.ChargedSpecies:                                         
                         C = self.GetChargedC(i)
@@ -936,23 +974,97 @@ class Gibbs_System():
                         if self.ValuesCurrent[(i+1)*2]  > self.SpeciesCTotal[i]/self.ValuesCurrent[0]:         
                             self.Write2Log('Value for operator {} > [max]; setting to [max]...\n'.format(i+1)) 
                             self.ValuesCurrent[(i+1)*2] = self.SpeciesCTotal[i]/self.ValuesCurrent[0] - 1e-5 
+                            
                     # update phase II for species i
                     for i in range(self.Nspecies):
                         Ci1 = self.ValuesCurrent[(i+1)*2]
                         Ci = self.SpeciesCTotal[i]
-                        f1 = self.ValuesCurrent[0]
+                        f1 = self.ValuesCurrent[0]                        
                         self.ValuesCurrent[(i+1)*2+1] = (Ci - Ci1 * f1)/(1. - f1)
-                                              
-                    # update time step for volume fraction
-                    DtC_tmp = []
-                    for i,Cpair1 in enumerate(self.Cpair1):
-                        DtC_tmp.append(np.min([Cpair1,self.Cpair2[i]]) * self.DtCpair[i])
-                    for i in self.NeutralSpecies:
-                        DtC_tmp.append(np.min([self.ValuesCurrent[(i+1)*2],self.ValuesCurrent[(i+1)*2+1]]) * self.Dt[i+1])
-                    Dtv = np.abs(np.min(DtC_tmp))/self.DtCtoDtv
-                    #Dt_new = np.array(self.Dt)
-                    #Dt_new[0] = Dtv
-                    #self.SetDt(Dt_new)
+
+                else: #steepest descent  
+                    if self.UseAdaptiveDtC:
+                        self.UpdateChargedDtC()                          
+                    if self.Barostat != True:
+                        for indx, var in enumerate(self.ValuesCurrent[::2]):                     
+                            if indx == 0: # volume fraction
+                                self.Write2Log('Volume fraction time step: {}\n'.format(self.Dt[0]))
+                                if self.Ensemble == 'NVT':
+                                    self.ValuesCurrent[indx*2] = var + self.Dt[indx]*self.DvalsCurrent[indx+1]
+                                    if self.ValuesCurrent[indx*2] < self.VolFracBounds[0]:
+                                        self.ValuesCurrent[indx*2] = self.VolFracBounds[0] # 0.10
+                                    if self.ValuesCurrent[indx*2] > self.VolFracBounds[1]:
+                                        self.ValuesCurrent[indx*2] = self.VolFracBounds[1] # 0.90
+                                    self.ValuesCurrent[indx*2+1] = 1.-self.ValuesCurrent[indx*2] # update phase II
+                                elif self.Ensemble == 'NPT':
+                                    CTot_new = self.CTotal - self.Dt[0]*dUdP # if P-Ptarget > 0, lower CTot, else increase
+                                    _NumberDens_Species = [CTot_new*_x for _x in self.SpeciesMoleFrac] # update number species
+                                    self.SetSpeciesCTotal(_NumberDens_Species) # update CTotal and SpeciesCTotals
+                                    
+                                    # update volume fractions
+                                    self.ValuesCurrent[indx*2] = var + self.Dt[indx]*self.DvalsCurrent[indx+1]
+                                    
+                                    if self.ValuesCurrent[indx*2] < self.VolFracBounds[0]:
+                                        self.ValuesCurrent[indx*2] = self.VolFracBounds[0] # 0.10
+                                    if self.ValuesCurrent[indx*2] > self.VolFracBounds[1]:
+                                        self.ValuesCurrent[indx*2] = self.VolFracBounds[1] # 0.90
+                                    self.ValuesCurrent[indx*2+1] = 1.-self.ValuesCurrent[indx*2] # update phase II
+                            else:  #update species
+                                # update neutral species first   
+                                if indx - 1 in self.NeutralSpecies: 
+                                    if self.UseAdaptiveDtC:  
+                                        Dt_tmp = self.Dt[indx]
+                                    else:
+                                        Dt_tmp = np.minimum(var,self.ValuesCurrent[indx*2+1])* self.Dt[indx]
+                                    DtC_tmp.append(Dt_tmp)
+                                    self.ValuesCurrent[indx*2] = var - self.Dt[indx] * self.DvalsCurrent[indx+1] 
+                                    if self.ValuesCurrent[indx*2]  < 0.:
+                                        self.Write2Log('Value for operator {} < 0; iterating...\n'.format(indx))
+                                        self.ValuesCurrent[indx*2] = var/2.
+                                    if self.ValuesCurrent[indx*2]  > self.SpeciesCTotal[indx-1]/self.ValuesCurrent[0]:       
+                                        self.Write2Log('Value for operator {} > [max]; setting to [max]...\n'.format(indx)) 
+                                        self.ValuesCurrent[indx*2] = self.SpeciesCTotal[indx-1]/self.ValuesCurrent[0] - 1e-5 
+    
+                        # update charged pair concentration
+                        for indx, [i,j] in enumerate(self.ChargedPairs):
+                            Cpair1 = self.Cpair1[indx]
+                            Cpair2 = self.Cpair2[indx]
+                            if self.UseAdaptiveDtC:
+                                Dt_tmp = self.DtCpair[indx]
+                            else:
+                                Dt_tmp = np.min([Cpair1,Cpair2]) * self.DtCpair[indx]
+                            DtC_tmp.append(Dt_tmp)
+                            dMuPair = self.MuPair1[indx] - self.MuPair2[indx]
+                            Cpair1 = Cpair1 - Dt_tmp * dMuPair
+                            self.Cpair1[indx] = Cpair1
+                        # update individual charged species concentration in box 1
+                        for i in self.ChargedSpecies:                                         
+                            C = self.GetChargedC(i)
+                            var = self.ValuesCurrent[(i+1)*2]
+                            self.ValuesCurrent[(i+1)*2] = C                                   
+                            if self.ValuesCurrent[(i+1)*2]  < 0.:
+                                self.Write2Log('Value for operator {} < 0; iterating...\n'.format(i+1))
+                                self.ValuesCurrent[(i+1)*2] = var/2.#temp_val
+                            if self.ValuesCurrent[(i+1)*2]  > self.SpeciesCTotal[i]/self.ValuesCurrent[0]:         
+                                self.Write2Log('Value for operator {} > [max]; setting to [max]...\n'.format(i+1)) 
+                                self.ValuesCurrent[(i+1)*2] = self.SpeciesCTotal[i]/self.ValuesCurrent[0] - 1e-5 
+                        # update phase II for species i
+                        for i in range(self.Nspecies):
+                            Ci1 = self.ValuesCurrent[(i+1)*2]
+                            Ci = self.SpeciesCTotal[i]
+                            f1 = self.ValuesCurrent[0]
+                            self.ValuesCurrent[(i+1)*2+1] = (Ci - Ci1 * f1)/(1. - f1)
+                                                  
+                        # update time step for volume fraction
+                        DtC_tmp = []
+                        for i,Cpair1 in enumerate(self.Cpair1):
+                            DtC_tmp.append(np.min([Cpair1,self.Cpair2[i]]) * self.DtCpair[i])
+                        for i in self.NeutralSpecies:
+                            DtC_tmp.append(np.min([self.ValuesCurrent[(i+1)*2],self.ValuesCurrent[(i+1)*2+1]]) * self.Dt[i+1])
+                        Dtv = np.abs(np.min(DtC_tmp))/self.DtCtoDtv
+                        #Dt_new = np.array(self.Dt)
+                        #Dt_new[0] = Dtv
+                        #self.SetDt(Dt_new)
                                                                                                  
         if self.UseReRun != True: # just to ensure if not using rerun, set self.ReRun = False.
             self.ReRun = False
@@ -1007,6 +1119,7 @@ class Gibbs_System():
         RPA1.Setkmin(self.kmin)
         RPA1.Setkmax(self.kmax)
         RPA1.Setnk(self.nk)                
+        RPA1.gD = self.gD
         RPA1.IncludeEvRPA=self.IncludeEvRPA
         RPA1.Initialize()
         
@@ -1029,10 +1142,17 @@ class Gibbs_System():
         return C1
         
     def TakeGibbsStep(self):
-        ''' Runs one simulation. '''
+        ''' Runs one simulation. '''                
+        if self.QNewton and self.Iteration == 1:
+            JacobianLog = open(self.JacobianLogName,'w')
+            JacobianLog.write('# step ')
+            for i in range(1+len(self.ChargedPairs)+len(self.NeutralSpecies)):
+                for j in range(1+len(self.ChargedPairs)+len(self.NeutralSpecies)):
+                    JacobianLog.write('invJ{}_{} '.format(i,j))
+            JacobianLog.write('\n')
+            JacobianLog.flush()
                 
-        if self.Converged == False:
-
+        if self.Converged == False:              
             # update the parameters, check if boxes switched; i.e. concentrated box became dilute box and vice-versa
             if self.Program == 'polyFTS' and self.JobType != 'MF' and self.JobType != 'RPA' and self.Barostat != True:
                 JobID_List = []
@@ -1171,12 +1291,16 @@ class Gibbs_System():
                 RPA1.Setkmax(self.kmax)
                 RPA1.Setnk(self.nk)                
                 RPA1.IncludeEvRPA=self.IncludeEvRPA
+                RPA1.gD = self.gD
                 RPA1.Initialize()
                 P1 = RPA1.P()
                 Operator_List1 = [[0.,0.],[P1,0.]]
                 for i in range(self.Nspecies):
                     mu1 = RPA1.mu(i)
                     Operator_List1.append([mu1,0.])
+
+                # save gD to avoid redundant calculation, boxI and boxII should have same gD
+                self.gD = RPA1.gD
                     
                 #model 2
                 C2 = []
@@ -1198,6 +1322,7 @@ class Gibbs_System():
                 RPA2.Setkmax(self.kmax)
                 RPA2.Setnk(self.nk)                
                 RPA2.IncludeEvRPA=self.IncludeEvRPA
+                RPA2.gD = self.gD
                 RPA2.Initialize()
                 P2 = RPA2.P()
                 Operator_List2 = [[0.,0.],[P2,0.]]

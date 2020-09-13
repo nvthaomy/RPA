@@ -8,20 +8,32 @@ Created on Tue Jul  7 14:02:28 2020
 import numpy as np
 from scipy.integrate import simps
 from numpy.linalg import det
-from scipy.misc import derivative
+
 #import matrix
 
 class RPA():
-    def __init__(self, nSpecies,nChain):
-        self.S = nSpecies # bead species
-        self.nChain = nChain # chain species
-        self.DOP = np.ones(self.S)
-        self.charge = np.zeros(self.S) # vector of charge/segment
-        self.C  = np.ones(self.S) # vector of species concentrations 
+    def __init__(self, nSpecies,nMolecule):
+        '''RPA class
+        Implement for DGC of homopolymer and copolymer
+                      CGC of homopolymer
+        TO DO: implement copolymer model for CGC'''
+        
+        self.M = nMolecule # molecule species
+        self.Cm = np.ones(self.M) # vector of BEAD concentration for each molecule species, Cm = DOP_m * nm / V
+        self.DOP = np.ones(self.M)
+        self.struc = [] # list of chain structures made up of bead indices
+        self.molCharge = np.zeros(self.M) # vector of charge/segment of molecues
+        self.beadFrac = [] # matrix of bead fraction in each molecue
+        self.n = np.ones(self.M) # number of chains for each molecue species  
+        
+        self.S = nSpecies # bead species                
+        self.charge = np.zeros(self.S) # charges of bead types       
+        self.C  = np.ones(self.S) # vector of bead species concentrations        
         self.abead = np.ones(self.S) # smearing length of beads
-        self.u0 = np.ones((self.S,self.S)) # excluded vol matrix
-        self.lB = 1.0 # Bjerrum length in kT
+        self.u0 = np.ones((self.S,self.S)) # excluded vol matrix        
         self.b = np.ones(self.S) # RMS length of bond, can be anything for small molecules
+
+        self.lB = 1.0 # Bjerrum length in kT
         self.V = 10.   
         self.kmin = 0.001 
         self.kmax = 1000 
@@ -30,23 +42,44 @@ class RPA():
         
         self.USI = np.ones((self.S,self.S))
         self.a = np.ones((self.S,self.S)) # smearing length of interaction matrix
-        self.n = np.ones(self.S) # number of molecules for each species  
+        
+        
         self.k = [] 
         self.dk = 0.1  
         self.U = [] # k-space matrices of excluded vol int.
         self.Ue = []              
         self.Gpp = []
         self.Gee = []
-        self.gD = None # list of gD for each molecule, if provided, dont have to recalculate
+        self.gD = None # for CGC, list of gD for each molecule, if provided, dont have to recalculate
+        self.gm_list = None # for DGC, list of structure factor like matrices (at all k numbers) for each molecule, independent of concentration
+        self.gme_list = None
         self.IncludeEvRPA = True # include perturbation term for the excluded volume interaction        
+    
+    def Setstruc(self,struc):
+        self.struc = struc
+        self.SetDOP()
+        beadFrac = np.zeros([self.S,self.M])
+        for m,struc in enumerate(self.struc):
+            beads, counts = np.unique(struc, return_counts=True)
+            f = np.array(counts,dtype=float)/float(np.sum(counts))
+            for i, bead in enumerate(beads):
+                beadFrac[int(bead),m] = f[i]
+        self.beadFrac = beadFrac
         
-    def SetDOP(self,DOP):
-        self.DOP = np.array(DOP, dtype=float)
+    def SetDOP(self):
+        DOP = np.zeros(self.M)
+        for i,struc in enumerate(self.struc):
+            DOP[i] = float(len(struc))
+        self.DOP = DOP
     def Setcharge(self,charge):
         self.charge = np.array(charge, dtype=float)
-    def SetC(self,C):
-        self.C = np.array(C, dtype=float)
-        self.n = self.C * self.V / self.DOP
+    def SetCm(self,Cm):
+        self.Cm = np.array(Cm, dtype=float)
+        self.n = self.Cm * self.V / self.DOP
+        if len(self.struc) == 0:
+            raise Exception('Need to set the chain structure with Setstruc(struc)')
+        else:
+            self.C =  self.beadFrac@self.Cm
     def Setabead(self,abead):
         self.abead = np.array(abead, dtype=float)
     def Setu0(self,u0):
@@ -90,51 +123,55 @@ class RPA():
         return gD
        
     
-    def GetGpp(self, V=None, i=None, n=None):
-        '''Density correlation matrix at all wavenumbers'''
+    def GetG(self, V=None, i=None, n=None):
+        '''Density and charge correlation matrices at all wavenumbers'''
         C = self.C  
-        # Perturb C[i] and V to calculate the derivative
-        if not i == None and not n == None:
-            C[i] = n * self.DOP[i]/self.V
-        elif not V == None:
-            C *= self.V/V
-        gD_list = []   
         Gpp = np.zeros((len(self.k),self.S,self.S))
-        for i in range(self.S):
-            if isinstance(self.gD,list) or isinstance(self.gD,np.ndarray):
-                gD = self.gD[i]
-            elif self.gD == None:
-                if self.chain == 'DGC':
-                    gD = self.gD_DGC(i)
-                elif self.chain == 'CGC':
-                    gD = self.gD_CGC(i)
-            gD_list.append(gD)
-            g = C[i] * self.DOP[i] * gD
-            Gpp[:,i,i] = g
-        return Gpp, gD_list
-    
-    def GetGee(self, V=None, i=None, n=None):
-        '''Charge correlation matrix'''
-        C = self.C        
-        # Perturb C[i] and V to calculate the derivative
-        if not i == None and not n == None:
-            C[i] = n * self.DOP[i]/self.V
-        elif not V == None:
-            C *= self.V/V  
-            
         Gee = np.zeros((len(self.k),self.S,self.S))
-        for i in range(self.S):
-            if isinstance(self.gD,list) or isinstance(self.gD,np.ndarray):
-                gD = self.gD[i]
-            elif self.gD == None:
-                if self.chain == 'DGC':
-                    gD = self.gD_DGC(i)
-                elif self.chain == 'CGC':
+
+        if self.chain == 'DGC':
+            # list of structure factor like matrices (at all k numbers) for each molecule, independent of concentration
+            if (isinstance(self.gm_list,list) or isinstance(self.gm_list,np.ndarray)) and (isinstance(self.gme_list,list) or isinstance(self.gme_list,np.ndarray)):
+                gm_list = self.gm_list
+                gme_list = self.gme_list
+            else:
+                gm_list = [] 
+                gme_list = []
+                for m, struc in enumerate(self.struc):
+                    gm = np.zeros([len(self.k), self.S, self.S])
+                    gme = np.zeros([len(self.k), self.S, self.S])
+                    for l in range(len(struc)):
+                        bead1 = struc[l]
+                        # using the Kuhn length of bead l for now
+                        b = self.b[bead1]
+                        for j in range(len(struc)):
+                            bead2 = struc[j]
+                            val = np.exp(-b**2 * self.k**2 / 6. * np.abs(l-j))
+                            gm[:,bead1,bead2] += val
+                            gme[:,bead1,bead2] += val * self.charge[bead1] * self.charge[bead2]
+                    gm_list.append(gm)
+                    gme_list.append(gme)
+                self.gm_list = gm_list
+                self.gme_list = gme_list
+            for m in range(self.M):
+                Gpp[:,:,:] += self.Cm[m]/self.DOP[m] * gm_list[m]
+                Gee[:,:,:] += self.Cm[m]/self.DOP[m] * gme_list[m]
+
+        elif self.chain == 'CGC':    
+            gD_list = []   
+            for i in range(self.S):
+                if isinstance(self.gD,list) or isinstance(self.gD,np.ndarray):
+                    gD = self.gD[i]
+                elif self.gD == None:
                     gD = self.gD_CGC(i)
-            g = C[i] * self.DOP[i] * self.charge[i]**2 * gD
-            Gee[:,i,i] = g
-        return Gee
-    
+                gD_list.append(gD)
+                g = C[i] * self.DOP[i] * gD
+                ge = C[i] * self.DOP[i] * self.charge[i]**2 * gD
+                Gpp[:,i,i] = g
+                Gee[:,i,i] = ge
+                self.gD = gD_list
+        return Gpp, Gee
+        
     def GetU(self):
         '''Excluded volume interaction matrix at all wavenumbers'''
         U = np.zeros((len(self.k),self.S,self.S))
@@ -174,24 +211,20 @@ class RPA():
             for j in range(self.S):
                 a[i,j] = np.sqrt((self.abead[i]**2 + self.abead[j]**2 )/2.)
         self.a = a
-        
+                            
         '''Self interaction energy in kB'''
         aii = self.a.diagonal()    
         u0ii = self.u0.diagonal()
-        U = 0.5 * ( self.n * self.DOP * u0ii/(4. * np.pi * aii**2) + self.n * self.DOP * self.lB)
+        U = 0.5 * self.C * self.V *( u0ii/(4. * np.pi * aii**2) + self.lB)
         self.USI = np.sum(U) 
 
-        '''Number of molecules'''
-        self.n = self.C * self.V / self.DOP
-        
         '''wave number'''
         self.k, self.dk = np.linspace(self.kmin, self.kmax, self.nk, endpoint = True, retstep = True)
         
         '''Struture factor related var'''
         self.U = self.GetU()
-        self.Gpp, self.gD = self.GetGpp()
+        self.Gpp, self.Gee = self.GetG()
         self.Ue = self.GetUe()
-        self.Gee =  self.GetGee() 
         self.UGpp, self.UeGee = self.DotUG()
         I = np.array([np.identity(self.S)]*len(self.k))
         self.Xs = I + self.UGpp
@@ -200,18 +233,15 @@ class RPA():
         self.invYs = None #inverse of Ys[k,:,:] for all k values
 
     def dAdn(self, a):
-        '''Jacobian matrix of [I + betaU*G] and [I + betaU_e*G_e] with respect to number of species a'''
+        '''Jacobian matrix of [I + betaU*G] and [I + betaU_e*G_e] with respect to number of molecule a'''
         J = np.zeros([len(self.k),self.S, self.S])
-        Je = np.zeros([len(self.k),self.S, self.S])    
-        #for i in range(self.S):
-        #     #for j in range(self.S):
-        #     j=a
-        #     for k in range(len(self.k)):
-        #         J[k,i,j] = np.dot(self.U[k,i,:],self.Gpp[k,:,j]) / self.C[j]
-        #         Je(k,i,j) = np.dot(self.Ue[k,i,:],self.Gee[k,:,j]) / self.C[j]
-
-        J[:,:,a] = self.DOP[a]/self.V * self.UGpp[:,:,a]/ self.C[a]
-        Je[:,:,a] = self.DOP[a]/self.V * self.UeGee[:,:,a]/ self.C[a]
+        Je = np.zeros([len(self.k),self.S, self.S])  
+        
+        for k in range(len(self.k)):    
+            J[k,:,:] = 1/self.DOP[a] * np.dot(self.U[k,:,:],self.gm_list[a][k,:,:])
+            Je[k,:,:] = 1/self.DOP[a] * np.dot(self.Ue[k,:,:],self.gme_list[a][k,:,:])   
+        J *= self.DOP[a]/self.V 
+        Je *= self.DOP[a]/self.V 
         return J, Je
         
     
@@ -224,23 +254,13 @@ class RPA():
     def F(self):
         ''' Free energy'''
         FMF = np.sum(self.n * np.log(self.n/self.V) - self.n) + self.V/2. * np.dot(np.dot(self.C,self.u0),self.C)
-        
-        U = self.U
-        Gpp = self.Gpp
-        Ue = self.Ue
-        Gee =  self.Gee
-        y=[]
-        for i,k in enumerate(self.k):                    
-            EE =  k**2 * np.log(det(np.identity(self.S)+ np.dot(Ue[i],Gee[i])))
-            y.append(EE)
+                
+        y = self.k**2 * np.log(det(self.Ys))                
         Fee = self.V/(4.*np.pi**2) * simps(y,self.k)
         F = FMF + Fee
  
         if self.IncludeEvRPA:
-            y = []
-            for i,k in enumerate(self.k):
-                PP = k**2 * np.log(det(np.identity(self.S)+ np.dot(U[i],Gpp[i])))
-                y.append(PP)
+            y = self.k**2 * np.log(det(self.Xs)) 
             Fpp = self.V/(4.*np.pi**2) * simps(y,self.k)
             F += Fpp        
 
@@ -249,8 +269,19 @@ class RPA():
     def mu(self, i):
         ''' Chemical potential'''
         
-        muMF = np.log(self.C[i]) - np.log(self.DOP[i]) + self.DOP[i] * np.dot(self.C,self.u0[i,:])
-                
+        muMF = np.log(self.Cm[i]) - np.log(self.DOP[i]) 
+        
+        y = 0
+        struc = self.struc[i]
+        for a in range(self.S):
+            for b in range(self.S):
+                if a in struc and not b in struc:
+                    y += 2. * self.beadFrac[a,i] * self.C[b] * self.u0[a,b]
+                elif a in struc and b in struc:
+                    y += (self.beadFrac[a,i] * self.C[b] + self.beadFrac[b,i] * self.C[a]) * self.u0[a,b]
+        y *= self.DOP[i]/2.
+        muMF += y
+        
         dXdns, dYdns = self.dAdn(i)
         y = []
         for j,k in enumerate(self.k):                       
@@ -258,22 +289,10 @@ class RPA():
             Y = self.Ys[j]
             dXdn = dXdns[j]
             dYdn = dYdns[j]
-            # calculate W = d/dni ln(det(X)) and T = d/dni ln(det(Y) using Jacobi's formula
-#            try:
+
             T = np.trace(np.matmul(np.linalg.inv(Y),dYdn))
-#            except:
-#                m = matrix.Matrix(Y.tolist())
-#                adjY = m.adjoint()
-#                adjY = np.array([adjY[t] for t in range(Y.shape[0])])
-#                T = 1/det(Y) * np.trace(np.matmul(adjY,dYdn))
             if self.IncludeEvRPA:
-#                try:
                 W = np.trace(np.matmul(np.linalg.inv(X),dXdn))
-#                except:
-#                    m = matrix.Matrix(X.tolist())
-#                    adjX = m.adjoint()
-#                    adjX = np.array([adjX[t] for t in range(X.shape[0])])
-#                    W = 1/det(X) * np.trace(np.matmul(adjX,dXdn))
                 y.append(k**2 * (W+T))
             else:
                 y.append(k**2 * T)            
@@ -284,7 +303,7 @@ class RPA():
     def P(self):
         '''Pressure'''
         
-        P_MF = np.sum(self.C/self.DOP) + 1./2. * np.dot(np.dot(self.C,self.u0),self.C)        
+        P_MF = np.sum(self.Cm/self.DOP) + 1./2. * np.dot(np.dot(self.C,self.u0),self.C)        
         dXdVs, dYdVs = self.dAdV()
         y = []
         for j,k in enumerate(self.k):                       
@@ -292,23 +311,10 @@ class RPA():
             Y = self.Ys[j]
             dXdV = dXdVs[j]
             dYdV = dYdVs[j]
-            # calculate W = d/dV ln(det(X)) and T = d/dV ln(det(Y) using Jacobi's formula
-#            try:
-            T = np.trace(np.matmul(np.linalg.inv(Y),dYdV))
-#            except:
-#                m = matrix.Matrix(Y.tolist())
-#                adjY = m.adjoint()
-#                adjY = np.array([adjY[t] for t in range(Y.shape[0])])
-#                T = 1/det(Y) * np.trace(np.matmul(adjY,dYdV))
             
+            T = np.trace(np.matmul(np.linalg.inv(Y),dYdV))
             if self.IncludeEvRPA:
-#                try:
                 W = np.trace(np.matmul(np.linalg.inv(X),dXdV))
-#                except:
-#                    m = matrix.Matrix(X.tolist())
-#                    adjX = m.adjoint()
-#                    adjX = np.array([adjX[t] for t in range(X.shape[0])])
-#                    W = 1/det(X) * np.trace(np.matmul(adjX,dXdV))
                 y.append(k**2 * (self.V*(W+T) + np.log(det(X)) + np.log(det(Y))))
             else:
                 y.append(k**2 * (self.V*(T) + np.log(det(Y))))                
