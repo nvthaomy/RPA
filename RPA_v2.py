@@ -98,19 +98,26 @@ class RPA():
         self.nk = int(nk)
     def Setchain(self,chain):
         self.chain = chain
+
     def gD_DGC(self,i):
-        '''Debye function for discreate gaussian chain of species i at all wavenumbers'''
+        '''Debye function for discrete gaussian chain of type i at all wavenumbers'''
+        b = self.b[i] 
         N = self.DOP[i]
+        kRg2 = self.k**2 * N * b**2 /6.
+        phi = np.exp(-kRg2/N)
+        gD = N*(1-phi**2.) + 2*phi*(phi**N-1)
+        gD/= N**2*(1-phi)**2        
+        return gD
+    
+    def gD_FJC(self,i):
+        '''Debye function for freely jointed chain of type i at all wavenumbers'''
         b = self.b[i]  
         k = self.k
-        gD = np.zeros(len(self.k))
-        for m in range(int(N)):
-            for j in range(m,int(N)): #calculating the upper half
-                if m==j:
-                    gD += 0.5 * np.exp(-b**2 * k**2/6. * np.abs(m-j)) #multiply by 0.5 to account for over counting when multiply by 2 at the end
-                else:
-                    gD += np.exp(-b**2 * k**2/6. * np.abs(m-j))
-        return 1./N**2 *2 * gD
+        N = self.DOP[i]
+        phi = np.sin(b*k)/(b*k)
+        gD = N*(1-phi**2.) + 2*phi*(phi**N-1)
+        gD/= N**2*(1-phi)**2        
+        return gD
 
     def gD_CGC(self,i):
         '''Debye function for continuous gaussian chain of species i at all wavenumbers'''
@@ -140,15 +147,24 @@ class RPA():
                 for m, struc in enumerate(self.struc):
                     gm = np.zeros([len(self.k), self.S, self.S])
                     gme = np.zeros([len(self.k), self.S, self.S])
-                    for l in range(len(struc)):
-                        bead1 = struc[l]
-                        # using the Kuhn length of bead l for now
-                        b = self.b[bead1]
-                        for j in range(len(struc)):
-                            bead2 = struc[j]
-                            val = np.exp(-b**2 * self.k**2 / 6. * np.abs(l-j))
-                            gm[:,bead1,bead2] += val
-                            gme[:,bead1,bead2] += val * self.charge[bead1] * self.charge[bead2]
+                    if len(np.unique(struc)) == 1: # use non-summation version for quicker calculation if the chain only has one bead species
+                        bead1=struc[0]
+                        if self.DOP[m]>1:
+                            gm[:,bead1,bead1] = self.DOP[m]**2 * self.gD_DGC(bead1) 
+                            gme[:,bead1,bead1] = self.DOP[m]**2 * self.gD_DGC(bead1) * self.charge[bead1]**2.
+                        else: # set to exact solution for small molecule to avoid error at low k
+                            gm[:,bead1,bead1] = np.ones(len(self.k)) 
+                            gme[:,bead1,bead1] = np.ones(len(self.k)) * self.charge[bead1]**2. 
+                    else:
+                        for l in range(len(struc)):
+                            bead1 = struc[l]
+                            # using the Kuhn length of bead l for now
+                            b = self.b[bead1]
+                            for j in range(len(struc)):
+                                bead2 = struc[j]
+                                val = np.exp(-b**2 * self.k**2 / 6. * np.abs(l-j)) 
+                                gm[:,bead1,bead2] += val
+                                gme[:,bead1,bead2] += val * self.charge[bead1] * self.charge[bead2]
                     gm_list.append(gm)
                     gme_list.append(gme)
                 self.gm_list = gm_list
@@ -169,7 +185,7 @@ class RPA():
                 ge = C[i] * self.DOP[i] * self.charge[i]**2 * gD
                 Gpp[:,i,i] = g
                 Gee[:,i,i] = ge
-                self.gD = gD_list
+            self.gD = gD_list
         return Gpp, Gee
         
     def GetU(self):
@@ -253,7 +269,7 @@ class RPA():
         
     def F(self):
         ''' Free energy'''
-        FMF = np.sum(self.n * np.log(self.n/self.V) - self.n) + self.V/2. * np.dot(np.dot(self.C,self.u0),self.C)
+        FMF = np.sum(self.n * (np.log(self.n) - np.log(self.V)) - self.n) + self.V/2. * np.dot(np.dot(self.C,self.u0),self.C)
                 
         y = self.k**2 * np.log(det(self.Ys))                
         Fee = self.V/(4.*np.pi**2) * simps(y,self.k)
