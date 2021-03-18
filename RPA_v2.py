@@ -269,7 +269,13 @@ class RPA():
         
     def F(self):
         ''' Free energy'''
-        FMF = np.sum(self.n * (np.log(self.n) - np.log(self.V)) - self.n) + self.V/2. * np.dot(np.dot(self.C,self.u0),self.C)
+        tmp = self.n * (np.log(self.n) - np.log(self.V)) - self.n
+        tmp1 = np.where(tmp==np.nan)[0] #screen out underflow with high concentration and recalculate with the equation below
+        tmp2 = np.where(tmp==np.inf)[0]
+        infIdx = np.concatenate((tmp1,tmp2))
+        if len(infIdx)>0:
+            tmp[infIdx] = np.log(self.n[infIdx]**(self.n[infIdx])) - self.n[infIdx] * np.log(self.V) - self.n[infIdx]
+        FMF = np.sum(tmp) + self.V/2. * np.dot(np.dot(self.C,self.u0),self.C)
                 
         y = self.k**2 * np.log(det(self.Ys))                
         Fee = self.V/(4.*np.pi**2) * simps(y,self.k)
