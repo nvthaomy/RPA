@@ -158,18 +158,29 @@ class RPA():
                 Gee[:,:,:] += self.Cm[m]/self.DOP[m] * gme_list[m]
 
         elif self.chain == 'CGC':    
-            gD_list = []   
+            gD_list = []
+            gm_list = []
+            gme_list = []
             for i in range(self.S):
+                gm = np.zeros([len(self.k), self.S, self.S])
+                gme = np.zeros([len(self.k), self.S, self.S])
                 if isinstance(self.gD,list) or isinstance(self.gD,np.ndarray):
                     gD = self.gD[i]
                 elif self.gD == None:
                     gD = self.gD_CGC(i)
+                gm[:,i,i] += self.DOP[i]**2. * gD 
+                gme[:,i,i] += self.DOP[i]**2. * gD * self.charge[i]**2
+                
                 gD_list.append(gD)
+                gm_list.append(gm)
+                gme_list.append(gme)               
                 g = C[i] * self.DOP[i] * gD
                 ge = C[i] * self.DOP[i] * self.charge[i]**2 * gD
                 Gpp[:,i,i] = g
                 Gee[:,i,i] = ge
-                self.gD = gD_list
+            self.gD = gD_list
+            self.gm_list = gm_list
+            self.gme_list = gme_list
         return Gpp, Gee
         
     def GetU(self):
@@ -298,8 +309,10 @@ class RPA():
                 y.append(k**2 * T)            
         muRPA = simps(y,self.k)
         muRPA *= self.V/(4.*np.pi**2)
-        return muMF + muRPA
-
+        try:
+            return muMF + muRPA, muMF
+        except:
+            return muMF + muRPA
     def P(self):
         '''Pressure'''
         
@@ -320,4 +333,7 @@ class RPA():
                 y.append(k**2 * (self.V*(T) + np.log(det(Y))))                
         PRPA = -1/(4.*np.pi**2) * simps(y,self.k)
 
-        return P_MF + PRPA
+        try:
+            return P_MF + PRPA, P_MF
+        except:
+            return P_MF + PRPA
