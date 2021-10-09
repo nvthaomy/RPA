@@ -331,10 +331,10 @@ class RPA():
                 y.append(k**2 * T)            
         muRPA = simps(y,self.k)
         muRPA *= self.V/(4.*np.pi**2)
-        try:
-            return muMF + muRPA, muMF
-        except:
-            return muMF + muRPA
+#        try:
+#            return muMF + muRPA, muMF
+#        except:
+        return muMF + muRPA
     def P(self):
         '''Pressure'''
         
@@ -355,7 +355,7 @@ class RPA():
                 y.append(k**2 * (self.V*(T) + np.log(det(Y))))                
         PRPA = -1/(4.*np.pi**2) * simps(y,self.k)
 
-        try:
-            return P_MF + PRPA, P_MF
-        except:
-            return P_MF + PRPA
+#        try:
+#            return P_MF + PRPA, P_MF
+#        except:
+        return P_MF + PRPA
