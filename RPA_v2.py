@@ -47,7 +47,8 @@ class RPA():
         self.k = [] 
         self.dk = 0.1  
         self.U = [] # k-space matrices of excluded vol int.
-        self.Ue = []              
+        self.Ue = [] # bare electrostatic interactions, no charge
+        self.Ue_charge = [] # electrostatic interactions with charges of bead i and j
         self.Gpp = []
         self.Gee = []
         self.gD = None # for CGC, list of gD for each molecule, if provided, dont have to recalculate
@@ -211,11 +212,13 @@ class RPA():
     def GetUe(self):
         '''Electrostatic interaction matrix at all wavenumbers'''
         Ue = np.zeros((len(self.k),self.S,self.S))
+        Ue_charge = np.zeros((len(self.k),self.S,self.S))
         k = self.k
         for i in range(self.S):
             for j in range(self.S):
                 Ue[:,i,j] = 4. * np.pi * self.lB / k**2 * np.exp(-self.a[i,j]**2 * k**2)
-        return Ue
+                Ue_charge[:,i,j] = Ue[:,i,j] * self.charge[i] * self.charge[j]
+        return Ue, Ue_charge
     
     def DotUG(self):
         '''Matrix multiplication of U * Gpp, Ue *Gee'''    
@@ -230,6 +233,31 @@ class RPA():
             UGpp[k] = np.matmul(U[k],Gpp[k])
             UeGee[k] = np.matmul(Ue[k],Gee[k])
         return UGpp, UeGee
+
+    def GetSk(self):
+        '''Structure factor matrix'''
+        Sk = np.zeros([len(self.k),self.S, self.S])
+        Sk_inv = np.zeros([len(self.k),self.S, self.S])
+
+        # loop through k vect and calculate inverse of S_pp, S_ee
+        for k in range(len(self.k)):
+            Sk_inv[k] = self.U[k] + self.Ue_charge[k] + np.linalg.inv(self.Gpp[k])
+            Sk[k] = np.linalg.inv(Sk_inv[k])
+        return Sk, Sk_inv
+
+    def GetSe(self):
+        '''Electrostatic structure factor 
+           Se = [1] Sk [1]'''
+        See = np.zeros([len(self.k),self.S, self.S])
+        See_inv = np.zeros([len(self.k),self.S, self.S])
+        Se = np.zeros(len(self.k))
+        # loop through k vect and calculate inverse of S_pp, S_ee
+        for k in range(len(self.k)):
+            See_inv[k] = self.Ue_charge[k] + np.linalg.inv(self.Gpp[k])
+            See[k] = np.linalg.inv(See_inv[k])
+            Se[k] = np.dot(np.dot(self.charge,See[k]),self.charge)
+#            Se[k] = np.sum(See[k])
+        return Se
 
     def Initialize(self):
         '''Smearing matrix'''
@@ -251,7 +279,7 @@ class RPA():
         '''Struture factor related var'''
         self.U = self.GetU()
         self.Gpp, self.Gee = self.GetG()
-        self.Ue = self.GetUe()
+        self.Ue, self.Ue_charge = self.GetUe()
         self.UGpp, self.UeGee = self.DotUG()
         I = np.array([np.identity(self.S)]*len(self.k))
         self.Xs = I + self.UGpp
