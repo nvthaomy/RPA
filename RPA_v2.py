@@ -55,7 +55,7 @@ class RPA():
         self.gm_list = None # for DGC, list of structure factor like matrices (at all k numbers) for each molecule, independent of concentration
         self.gme_list = None
         self.IncludeEvRPA = True # include perturbation term for the excluded volume interaction        
-    
+        self.MF = False # do MF approximation 
     def Setstruc(self,struc):
         self.struc = struc
         self.SetDOP()
@@ -129,8 +129,14 @@ class RPA():
         x = N * k**2 * b**2 /6.
         gD = 2. * x**-2 * (x + np.exp(-x) - 1.)
         return gD
-       
-    
+
+    def gD_rod(self,i):
+        '''Alternative for the Debye function, used for semiflexible rod''' 
+        N = self.DOP[i]
+        b = self.b[i]
+        k = self.k
+        return 1./(1.+N*b*k/np.pi)
+
     def GetG(self, V=None, i=None, n=None):
         '''Density and charge correlation matrices at all wavenumbers'''
         C = self.C  
@@ -170,34 +176,38 @@ class RPA():
                     gme_list.append(gme)
                 self.gm_list = gm_list
                 self.gme_list = gme_list
-            for m in range(self.M):
-                Gpp[:,:,:] += self.Cm[m]/self.DOP[m] * gm_list[m]
-                Gee[:,:,:] += self.Cm[m]/self.DOP[m] * gme_list[m]
 
-        elif self.chain == 'CGC':    
+        elif self.chain in ['CGC', 'rod']:    
+            # Assume homopolymer chains
             gD_list = []
             gm_list = []
             gme_list = []
-            for i in range(self.S):
+            for m, struc in enumerate(self.struc):
                 gm = np.zeros([len(self.k), self.S, self.S])
                 gme = np.zeros([len(self.k), self.S, self.S])
-                if isinstance(self.gD,list) or isinstance(self.gD,np.ndarray):
-                    gD = self.gD[i]
-                elif self.gD == None:
-                    gD = self.gD_CGC(i)
-                gm[:,i,i] += self.DOP[i]**2. * gD 
-                gme[:,i,i] += self.DOP[i]**2. * gD * self.charge[i]**2
-                
+                if self.DOP[m]>1:
+                    if len(np.unique(struc)) != 1:
+                        raise Exception('Continuous Gaussian and rod-like chains are only supported for homogeneous polymers')
+                    if self.chain == 'CGC':
+                        gD = self.gD_CGC(struc[0])
+                    elif self.chain == 'rod':
+                        gD = self.gD_rod(struc[0])
+                    gm[:,struc[0],struc[0]] = self.DOP[m]**2. * gD 
+                    gme[:,struc[0],struc[0]] = self.DOP[m]**2. * gD * self.charge[struc[0]]**2
+                else: # set to exact solution for small molecule to avoid error at low k
+                    gm[:,struc[0],struc[0]] = np.ones(len(self.k))
+                    gme[:,struc[0],struc[0]] = np.ones(len(self.k)) * self.charge[struc[0]]**2.                
                 gD_list.append(gD)
                 gm_list.append(gm)
                 gme_list.append(gme)               
-                g = C[i] * self.DOP[i] * gD
-                ge = C[i] * self.DOP[i] * self.charge[i]**2 * gD
-                Gpp[:,i,i] = g
-                Gee[:,i,i] = ge
             self.gD = gD_list
             self.gm_list = gm_list
             self.gme_list = gme_list
+
+        for m in range(self.M):
+            Gpp[:,:,:] += self.Cm[m]/self.DOP[m] * gm_list[m]
+            Gee[:,:,:] += self.Cm[m]/self.DOP[m] * gme_list[m]
+
         return Gpp, Gee
         
     def GetU(self):
@@ -278,14 +288,15 @@ class RPA():
         
         '''Struture factor related var'''
         self.U = self.GetU()
-        self.Gpp, self.Gee = self.GetG()
         self.Ue, self.Ue_charge = self.GetUe()
-        self.UGpp, self.UeGee = self.DotUG()
-        I = np.array([np.identity(self.S)]*len(self.k))
-        self.Xs = I + self.UGpp
-        self.Ys = I + self.UeGee
-        self.invXs = None #inverse of Xs[k,:,:] for all k values
-        self.invYs = None #inverse of Ys[k,:,:] for all k values
+        if not self.MF:        
+            self.Gpp, self.Gee = self.GetG()
+            self.UGpp, self.UeGee = self.DotUG()
+            I = np.array([np.identity(self.S)]*len(self.k))
+            self.Xs = I + self.UGpp
+            self.Ys = I + self.UeGee
+            self.invXs = None #inverse of Xs[k,:,:] for all k values
+            self.invYs = None #inverse of Ys[k,:,:] for all k values
 
     def dAdn(self, a):
         '''Jacobian matrix of [I + betaU*G] and [I + betaU_e*G_e] with respect to number of molecule a'''
@@ -315,16 +326,17 @@ class RPA():
         if len(infIdx)>0:
             tmp[infIdx] = np.log(self.n[infIdx]**(self.n[infIdx])) - self.n[infIdx] * np.log(self.V) - self.n[infIdx]
         FMF = np.sum(tmp) + self.V/2. * np.dot(np.dot(self.C,self.u0),self.C)
-                
-        y = self.k**2 * np.log(det(self.Ys))                
-        Fee = self.V/(4.*np.pi**2) * simps(y,self.k)
-        F = FMF + Fee
- 
-        if self.IncludeEvRPA:
-            y = self.k**2 * np.log(det(self.Xs)) 
-            Fpp = self.V/(4.*np.pi**2) * simps(y,self.k)
-            F += Fpp        
+        F = FMF      
 
+        if not self.MF:
+            if any(self.charge):
+                y = self.k**2 * np.log(det(self.Ys))
+                Fee = self.V/(4.*np.pi**2) * simps(y,self.k)
+                F += Fee
+            if self.IncludeEvRPA:
+                y = self.k**2 * np.log(det(self.Xs)) 
+                Fpp = self.V/(4.*np.pi**2) * simps(y,self.k)
+                F += Fpp        
         return F
 
     def mu(self, i):
@@ -342,48 +354,57 @@ class RPA():
                     y += (self.beadFrac[a,i] * self.C[b] + self.beadFrac[b,i] * self.C[a]) * self.u0[a,b]
         y *= self.DOP[i]/2.
         muMF += y
-        
-        dXdns, dYdns = self.dAdn(i)
-        y = []
-        for j,k in enumerate(self.k):                       
-            X = self.Xs[j]
-            Y = self.Ys[j]
-            dXdn = dXdns[j]
-            dYdn = dYdns[j]
+        mu = muMF
+        if not self.MF:
+            dXdns, dYdns = self.dAdn(i)
+            y = []
+            for j,k in enumerate(self.k):                       
+                X = self.Xs[j]
+                Y = self.Ys[j]
+                dXdn = dXdns[j]
+                dYdn = dYdns[j]
 
-            T = np.trace(np.matmul(np.linalg.inv(Y),dYdn))
-            if self.IncludeEvRPA:
-                W = np.trace(np.matmul(np.linalg.inv(X),dXdn))
-                y.append(k**2 * (W+T))
+                if any(self.charge):
+                    T = np.trace(np.matmul(np.linalg.inv(Y),dYdn))
+                else:
+                    T = 0.
+                if self.IncludeEvRPA:
+                    W = np.trace(np.matmul(np.linalg.inv(X),dXdn))
+                    y.append(k**2 * (W+T))
+                else:
+                    y.append(k**2 * T)            
+            if any(self.charge) or self.IncludeEvRPA:
+                muRPA = simps(y,self.k)
+                muRPA *= self.V/(4.*np.pi**2)
             else:
-                y.append(k**2 * T)            
-        muRPA = simps(y,self.k)
-        muRPA *= self.V/(4.*np.pi**2)
-#        try:
-#            return muMF + muRPA, muMF
-#        except:
-        return muMF + muRPA
+                muRPA = 0
+            mu += muRPA
+        return mu
     def P(self):
         '''Pressure'''
-        
         P_MF = np.sum(self.Cm/self.DOP) + 1./2. * np.dot(np.dot(self.C,self.u0),self.C)        
-        dXdVs, dYdVs = self.dAdV()
-        y = []
-        for j,k in enumerate(self.k):                       
-            X = self.Xs[j]
-            Y = self.Ys[j]
-            dXdV = dXdVs[j]
-            dYdV = dYdVs[j]
-            
-            T = np.trace(np.matmul(np.linalg.inv(Y),dYdV))
-            if self.IncludeEvRPA:
-                W = np.trace(np.matmul(np.linalg.inv(X),dXdV))
-                y.append(k**2 * (self.V*(W+T) + np.log(det(X)) + np.log(det(Y))))
+        P = P_MF
+        if not self.MF:
+            dXdVs, dYdVs = self.dAdV()
+            y = []
+            for j,k in enumerate(self.k):                       
+                X = self.Xs[j]
+                Y = self.Ys[j]
+                dXdV = dXdVs[j]
+                dYdV = dYdVs[j]
+                
+                if any(self.charge):
+                    T = np.trace(np.matmul(np.linalg.inv(Y),dYdV))
+                else:
+                    T = 0
+                if self.IncludeEvRPA:
+                    W = np.trace(np.matmul(np.linalg.inv(X),dXdV))
+                    y.append(k**2 * (self.V*(W+T) + np.log(det(X)) + np.log(det(Y))))
+                else:
+                    y.append(k**2 * (self.V*(T) + np.log(det(Y))))                
+            if any(self.charge) or self.IncludeEvRPA:
+                PRPA = -1/(4.*np.pi**2) * simps(y,self.k)
             else:
-                y.append(k**2 * (self.V*(T) + np.log(det(Y))))                
-        PRPA = -1/(4.*np.pi**2) * simps(y,self.k)
-
-#        try:
-#            return P_MF + PRPA, P_MF
-#        except:
-        return P_MF + PRPA
+                PRPA = 0.
+            P += PRPA
+        return P

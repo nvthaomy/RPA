@@ -1,3 +1,6 @@
+rpa_charles.py
+RPA.py
+*.swp
 __pycache__
 *pyc
 test/
